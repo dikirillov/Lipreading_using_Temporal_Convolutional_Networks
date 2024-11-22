@@ -102,9 +102,14 @@ def extract_feats(model):
     :rtype: FloatTensor
     """
     model.eval()
-    preprocessing_func = get_preprocessing_pipelines()['test']
-    data = preprocessing_func(np.load(args.mouth_patch_path)['data'])  # data: TxHxW
-    return model(torch.FloatTensor(data)[None, None, :, :, :].cuda(), lengths=[data.shape[0]])
+    model.use_boundary = False
+    preprocessing_func = get_preprocessing_pipelines("video")['test']
+    for filename in tqdm(os.listdir(f"{args.mouth_patch_path}/mouths")):
+        data = (np.load(f"{args.mouth_patch_path}/mouths/{filename}")["data"])
+        save2npz(
+            f"{args.mouth_patch_path}/mouths_embeds/{filename}",
+            model(torch.FloatTensor(data).cuda().unsqueeze(0).unsqueeze(1), lengths=[data.shape[0]]).cpu().detach().numpy()
+        )
 
 
 def evaluate(model, dset_loader, criterion):
@@ -232,72 +237,9 @@ def get_model_from_json():
 
 
 def main():
-
-    # -- logging
-    save_path = get_save_folder( args)
-    print(f"Model and log being saved in: {save_path}")
-    logger = get_logger(args, save_path)
-    ckpt_saver = CheckpointSaver(save_path)
-
-    # -- get model
     model = get_model_from_json()
-    # -- get dataset iterators
-    dset_loaders = get_data_loaders(args)
-    # -- get loss function
-    criterion = nn.CrossEntropyLoss()
-    # -- get optimizer
-    optimizer = get_optimizer(args, optim_policies=model.parameters())
-    # -- get learning rate scheduler
-    scheduler = CosineScheduler(args.lr, args.epochs)
-
-    if args.model_path:
-        assert os.path.isfile(args.model_path), \
-            f"Model path does not exist. Path input: {args.model_path}"
-        # resume from checkpoint
-        if args.init_epoch > 0:
-            model, optimizer, epoch_idx, ckpt_dict = load_model(args.model_path, model, optimizer)
-            args.init_epoch = epoch_idx
-            ckpt_saver.set_best_from_ckpt(ckpt_dict)
-            logger.info(f'Model and states have been successfully loaded from {args.model_path}')
-        # init from trained model
-        else:
-            model = load_model(args.model_path, model, allow_size_mismatch=args.allow_size_mismatch)
-            logger.info(f'Model has been successfully loaded from {args.model_path}')
-        # feature extraction
-        if args.mouth_patch_path:
-            save2npz( args.mouth_embedding_out_path, data = extract_feats(model).cpu().detach().numpy())
-            return
-        # if test-time, performance on test partition and exit. Otherwise, performance on validation and continue (sanity check for reload)
-        if args.test:
-            acc_avg_test, loss_avg_test = evaluate(model, dset_loaders['test'], criterion)
-            logger.info(f"Test-time performance on partition {'test'}: Loss: {loss_avg_test:.4f}\tAcc:{acc_avg_test:.4f}")
-            return
-
-    # -- fix learning rate after loading the ckeckpoint (latency)
-    if args.model_path and args.init_epoch > 0:
-        scheduler.adjust_lr(optimizer, args.init_epoch-1)
-
-    epoch = args.init_epoch
-
-    while epoch < args.epochs:
-        model = train(model, dset_loaders['train'], criterion, epoch, optimizer, logger)
-        acc_avg_val, loss_avg_val = evaluate(model, dset_loaders['val'], criterion)
-        logger.info(f"{'val'} Epoch:\t{epoch:2}\tLoss val: {loss_avg_val:.4f}\tAcc val:{acc_avg_val:.4f}, LR: {showLR(optimizer)}")
-        # -- save checkpoint
-        save_dict = {
-            'epoch_idx': epoch + 1,
-            'model_state_dict': model.state_dict(),
-            'optimizer_state_dict': optimizer.state_dict()
-        }
-        ckpt_saver.save(save_dict, acc_avg_val)
-        scheduler.adjust_lr(optimizer, epoch)
-        epoch += 1
-
-    # -- evaluate best-performing epoch on test partition
-    best_fp = os.path.join(ckpt_saver.save_dir, ckpt_saver.best_fn)
-    _ = load_model(best_fp, model)
-    acc_avg_test, loss_avg_test = evaluate(model, dset_loaders['test'], criterion)
-    logger.info(f"Test time performance of best epoch: {acc_avg_test} (loss: {loss_avg_test})")
-
+    model = load_model(args.model_path, model, allow_size_mismatch=args.allow_size_mismatch)
+    extract_feats(model)
+    
 if __name__ == '__main__':
     main()
